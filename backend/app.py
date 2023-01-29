@@ -1,9 +1,12 @@
 from flask import Flask, request, redirect, session
-import cohere, requests, os, json
+import cohere, requests, os, json, time
 from dotenv import load_dotenv
 from urllib.parse import quote
+from xml.etree import ElementTree
 
 app = Flask(__name__)
+
+load_dotenv()
 
 SPOTIFY_CLIENT_ID = os.environ.get('CLIENT_ID')
 
@@ -26,13 +29,42 @@ spotify_auth_query_params = {
     'client_id': SPOTIFY_CLIENT_ID
 }
 
-load_dotenv()
+co = cohere.Client(os.environ.get('COHERE_API_KEY'))
+
+def read_to_get_song(paragraph: str):
+    print("Give me a real song related to the following paragraph:\n\n" + paragraph)
+    response = co.generate(
+        prompt = "Give me the name of a real song related to the following paragraph:\n\n" + paragraph,
+        model = "command-xlarge",
+        truncate = "END"
+    )
+    return response[0]
 
 @app.route('/')
 def get_song():
+    args = request.args.to_dict()
+    paragraphs = []
 
-    titles = ["Telephone", "Telecommunication", "I Want to Hold Your Hand"]
-    artists = ["Lady Gaga", "Herbie Hancock", "The Beatles"]
+    xml_res = requests.get(args['url'])
+    xml_struct = ElementTree.fromstring(xml_res.content)
+    sections = xml_struct.findall("Body/Section")
+    for section in sections:
+        cur_para = ""
+        for txt in section.iterfind("Text"):
+            cur_para += "".join(txt.itertext())
+        paragraphs.append(cur_para)
+
+    paragraphs = [para for para in paragraphs if para != ""]
+
+    titles = []
+    artists = []
+
+    for paragraph in paragraphs:
+        cur_resp = read_to_get_song(paragraph)
+        print(cur_resp)
+        if " by " in cur_resp:
+            titles.append(cur_resp.split(" by ")[0])
+            artists.append(cur_resp.split(" by ")[1])
 
     session["titles"] = titles
     session["artists"] = artists
@@ -67,12 +99,18 @@ def authorize():
     authorization_header = {'Authorization': 'Bearer {}'.format(access_token), 'Content-Type': "application/json"}
 
     for i, title in enumerate(titles):
-        response = requests.get("https://api.spotify.com/v1/search?q=" + quote(title) + r"%20artist:" + quote(artists[i]) + "&type=track&limit=1&offset=0", headers = authorization_header)
+        response = requests.get("https://api.spotify.com/v1/search?q=" + quote(title) + r"%20" + quote(artists[i]) + "&type=track&limit=1&offset=0", headers = authorization_header)
         res_json = response.json()
         if 'items' in res_json['tracks'] and len(res_json['tracks']['items']) > 0:
             song_ids.append("spotify:track:" +  res_json['tracks']['items'][0]['id'])
         else:
-            print(res_json)
+            response = requests.get("https://api.spotify.com/v1/search?q=" + quote(title) + "&type=track&limit=1&offset=0", headers = authorization_header)
+            res_json = response.json()
+            if 'items' in res_json['tracks'] and len(res_json['tracks']['items']) > 0:
+                song_ids.append("spotify:track:" +  res_json['tracks']['items'][0]['id'])
+            else:
+                print(res_json)
+        time.sleep(0.25)
 
     user_profile_api_endpoint = "https://api.spotify.com/v1/me"
     profile_response = requests.get(user_profile_api_endpoint, headers = authorization_header)
